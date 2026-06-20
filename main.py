@@ -4,9 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict
-import os
 
-# Suas importações estáveis da v17
 from kahoot import KahootClient
 from kahoot.packets.impl.respond import RespondPacket
 from kahoot.packets.server.question_start import QuestionStartPacket
@@ -22,7 +20,6 @@ app.add_middleware(
 )
 
 CORES = {"vermelho": 0, "azul": 1, "amarelo": 2, "verde": 3}
-# Guarda as tarefas dos bots ativos em background
 jogos_ativos: Dict[int, list] = {}
 
 class BotConfig(BaseModel):
@@ -37,12 +34,8 @@ async def criar_bot_web(pin: int, nome: str, cor_index: Optional[int], atraso_fi
 
     async def ao_iniciar_pergunta(packet: QuestionStartPacket):
         numero_pergunta: int = packet.game_block_index
-        tempo_base_leitura = 4.0
-        atraso_real = tempo_base_leitura + atraso_fixo
-        
-        await asyncio.sleep(atraso_real)
+        await asyncio.sleep(4.0 + atraso_fixo)
         escolha = cor_index if cor_index is not None else random.randint(0, 3)
-
         try:
             await cliente.send_packet(RespondPacket(cliente.game_pin, escolha, numero_pergunta))
         except Exception:
@@ -55,7 +48,6 @@ async def criar_bot_web(pin: int, nome: str, cor_index: Optional[int], atraso_fi
         while True:
             await asyncio.sleep(1)
     except asyncio.CancelledError:
-        # Quando o pânico cancela a tarefa, desconecta o WebSocket de forma limpa
         try:
             await cliente.leave_game()
         except Exception:
@@ -76,14 +68,13 @@ async def conectar(config: BotConfig):
         tarefa = asyncio.create_task(criar_bot_web(config.pin, nome, cor_index, config.atraso))
         jogos_ativos[config.pin].append(tarefa)
 
-    return {"status": "sucesso", "mensagem": f"{config.quantidade} bots enviados simultaneamente!"}
+    return {"status": "sucesso", "mensagem": f"{config.quantidade} bots injetados!"}
 
 @app.post("/desconectar/{pin}")
 async def modo_panico(pin: int):
     if pin not in jogos_ativos or not jogos_ativos[pin]:
         return {"status": "aviso", "mensagem": "Nenhum bot ativo para este PIN."}
 
-    # Executa o botão de pânico cancelando todas as conexões assíncronas de uma vez
     for tarefa in jogos_ativos[pin]:
         tarefa.cancel()
         
