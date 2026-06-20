@@ -1,4 +1,4 @@
 fastapi
 uvicorn
 pydantic
-kahoot-py
+git+https://github.com/vehbiu/kahoot-py.git
