@@ -1,4 +1,4 @@
 fastapi
 uvicorn
 pydantic
-kahoot-doc-py
+kahoot-py
