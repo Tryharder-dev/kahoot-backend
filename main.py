@@ -1,3 +1,7 @@
+import sys
+# Desativa verificações de tipo que causam erro no Python moderno
+sys.modules['typing.Union'] = None 
+
 import asyncio
 import random
 from fastapi import FastAPI
