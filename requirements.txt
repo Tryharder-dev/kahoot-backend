@@ -1,4 +1,4 @@
 fastapi
 uvicorn
 pydantic
-https://github.com/theadavies/kahoot.py/archive/refs/heads/main.zip
+kahoot==1.1.0
