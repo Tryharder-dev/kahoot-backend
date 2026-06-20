@@ -1,5 +1,6 @@
 fastapi>=0.115.0
 uvicorn>=0.30.0
 pydantic>=2.0
+httpcore==0.17.3
+httpx==0.24.1
 kahoot==1.1.0
-
