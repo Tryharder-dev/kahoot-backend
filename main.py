@@ -20,8 +20,6 @@ app.add_middleware(
 )
 
 CORES = {"vermelho": 0, "azul": 1, "amarelo": 2, "verde": 3}
-
-# Rastreamento global definitivo para o Botão de Pânico
 clientes_ativos = []
 
 class BotConfig(BaseModel):
@@ -31,24 +29,30 @@ class BotConfig(BaseModel):
     cor: Optional[str] = None
     atraso: Optional[float] = 1.5
 
-async def criar_bot_web(pin: int, nome: str, cor_index: Optional[int], atraso_fixo: float, index_bot: int):
+class VotoManualConfig(BaseModel):
+    cor: str
+
+async def criar_bot_web(pin: int, nome: str, cor_estrategia: Optional[str], atraso_fixo: float, index_bot: int):
     cliente = KahootClient()
+    cliente.pergunta_atual = 0  # Guarda o ID da pergunta atual para o voto manual
     clientes_ativos.append(cliente)
 
     async def ao_iniciar_pergunta(packet: QuestionStartPacket):
-        numero_pergunta: int = packet.game_block_index
-        tempo_base_kahoot = 4.0  # Tempo de espera da animação de introdução da pergunta
+        cliente.pergunta_atual = packet.game_block_index
         
-        # Micro-escalonamento para burlar o bloqueio de IP do Kahoot
-        # Cria uma fila milimétrica de milissegundos entre os bots
-        micro_atraso = index_bot * 0.025
-        atraso_final = tempo_base_kahoot + atraso_fixo + micro_atraso
+        # Se estiver no modo manual, o bot apenas aguarda a sua ordem e não faz nada sozinho
+        if cor_estrategia == "manual":
+            return
+            
+        # Sincronização Absoluta (Automático)
+        micro_atraso = index_bot * 0.005 # 5ms entre cada bot para bater todos no mesmo segundo sem dar bloqueio
+        atraso_final = 4.0 + atraso_fixo + micro_atraso
         
         await asyncio.sleep(atraso_final)
-        escolha = cor_index if cor_index is not None else random.randint(0, 3)
-
+        
+        escolha = CORES.get(cor_estrategia) if cor_estrategia in CORES else random.randint(0, 3)
         try:
-            await cliente.send_packet(RespondPacket(cliente.game_pin, escolha, numero_pergunta))
+            await cliente.send_packet(RespondPacket(cliente.game_pin, escolha, cliente.pergunta_atual))
         except Exception:
             pass
 
@@ -56,7 +60,6 @@ async def criar_bot_web(pin: int, nome: str, cor_index: Optional[int], atraso_fi
 
     try:
         await cliente.join_game(pin, nome)
-        # Mantém o bot vivo enquanto ele estiver na lista global de ativos
         while cliente in clientes_ativos:
             await asyncio.sleep(1)
     except Exception:
@@ -67,34 +70,49 @@ async def criar_bot_web(pin: int, nome: str, cor_index: Optional[int], atraso_fi
 
 @app.post("/conectar")
 async def conectar(config: BotConfig):
-    # Garante limpeza de sessões fantasmas anteriores antes de reatar
     global clientes_ativos
     clientes_ativos.clear()
 
-    cor_index = CORES.get(config.cor.lower()) if config.cor else None
-
     for i in range(1, config.quantidade + 1):
         nome = f"{config.nome_base}{i}"
-        # Dispara os bots passando o seu índice na fila para o micro-escalonamento
-        asyncio.create_task(criar_bot_web(config.pin, nome, cor_index, config.atraso, i))
+        asyncio.create_task(criar_bot_web(config.pin, nome, config.cor, config.atraso, i))
 
-    return {"status": "sucesso", "mensagem": f"{config.quantidade} bots preparados na fila de injeção!"}
+    return {"status": "sucesso", "mensagem": f"{config.quantidade} bots na sessão!"}
+
+@app.post("/votar")
+async def votar_ao_vivo(voto: VotoManualConfig):
+    global clientes_ativos
+    if not clientes_ativos:
+        return {"status": "erro", "mensagem": "Nenhum bot conectado para votar."}
+        
+    cor_index = CORES.get(voto.cor.lower())
+    if cor_index is None:
+        return {"status": "erro", "mensagem": "Cor inválida."}
+
+    votos_enviados = 0
+    # Dispara a horda inteira quase simultaneamente
+    for i, cliente in enumerate(clientes_ativos):
+        async def enviar_voto(c, idx, id_pergunta):
+            await asyncio.sleep(idx * 0.005) # Sincronização perfeita de 5ms
+            try:
+                await c.send_packet(RespondPacket(c.game_pin, cor_index, id_pergunta))
+            except Exception:
+                pass
+        
+        asyncio.create_task(enviar_voto(cliente, i, getattr(cliente, 'pergunta_atual', 0)))
+        votos_enviados += 1
+
+    return {"status": "sucesso", "mensagem": f"Ataque em massa: Voto {voto.cor.upper()} enviado!"}
 
 @app.post("/desconectar")
 async def modo_panico():
     global clientes_ativos
-    if not clientes_ativos:
-        return {"status": "aviso", "mensagem": "Nenhum bot ativo encontrado no servidor."}
-
-    quantidade_derrubada = len(clientes_ativos)
-    
-    # Executa desconexão forçada na raiz do protocolo de rede
+    quantidade = len(clientes_ativos)
     for cliente in list(clientes_ativos):
         try:
             await cliente.leave_game()
         except Exception:
             pass
-            
     clientes_ativos.clear()
-    return {"status": "sucesso", "mensagem": f"PÂNICO EXECITADO! {quantidade_derrubada} conexões encerradas."}
+    return {"status": "sucesso", "mensagem": f"PÂNICO: {quantidade} bots desconectados."}
     
