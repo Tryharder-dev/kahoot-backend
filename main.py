@@ -1,5 +1,6 @@
 import asyncio
 import random
+import urllib.request
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -32,20 +33,27 @@ class BotConfig(BaseModel):
 class VotoManualConfig(BaseModel):
     cor: str
 
+def verificar_pin(pin: int) -> bool:
+    """Verifica diretamente na API do Kahoot se o PIN existe antes de tentar conectar."""
+    try:
+        req = urllib.request.Request(f"https://kahoot.it/reserve/session/{pin}/", headers={'User-Agent': 'Mozilla/5.0'})
+        urllib.request.urlopen(req)
+        return True
+    except Exception:
+        return False
+
 async def criar_bot_web(pin: int, nome: str, cor_estrategia: Optional[str], atraso_fixo: float, index_bot: int):
     cliente = KahootClient()
-    cliente.pergunta_atual = 0  # Guarda o ID da pergunta atual para o voto manual
+    cliente.pergunta_atual = 0
     clientes_ativos.append(cliente)
 
     async def ao_iniciar_pergunta(packet: QuestionStartPacket):
         cliente.pergunta_atual = packet.game_block_index
         
-        # Se estiver no modo manual, o bot apenas aguarda a sua ordem e não faz nada sozinho
         if cor_estrategia == "manual":
             return
             
-        # Sincronização Absoluta (Automático)
-        micro_atraso = index_bot * 0.005 # 5ms entre cada bot para bater todos no mesmo segundo sem dar bloqueio
+        micro_atraso = index_bot * 0.005
         atraso_final = 4.0 + atraso_fixo + micro_atraso
         
         await asyncio.sleep(atraso_final)
@@ -71,13 +79,18 @@ async def criar_bot_web(pin: int, nome: str, cor_estrategia: Optional[str], atra
 @app.post("/conectar")
 async def conectar(config: BotConfig):
     global clientes_ativos
+    
+    # 1. Validação estrita do PIN antes de fazer qualquer coisa
+    if not verificar_pin(config.pin):
+        return {"status": "erro", "mensagem": "PIN INVÁLIDO. Verifique os números ou se a sala está aberta."}
+        
     clientes_ativos.clear()
 
     for i in range(1, config.quantidade + 1):
         nome = f"{config.nome_base}{i}"
         asyncio.create_task(criar_bot_web(config.pin, nome, config.cor, config.atraso, i))
 
-    return {"status": "sucesso", "mensagem": f"{config.quantidade} bots na sessão!"}
+    return {"status": "sucesso", "mensagem": f"{config.quantidade} bots injetados na sessão!"}
 
 @app.post("/votar")
 async def votar_ao_vivo(voto: VotoManualConfig):
@@ -90,10 +103,9 @@ async def votar_ao_vivo(voto: VotoManualConfig):
         return {"status": "erro", "mensagem": "Cor inválida."}
 
     votos_enviados = 0
-    # Dispara a horda inteira quase simultaneamente
     for i, cliente in enumerate(clientes_ativos):
         async def enviar_voto(c, idx, id_pergunta):
-            await asyncio.sleep(idx * 0.005) # Sincronização perfeita de 5ms
+            await asyncio.sleep(idx * 0.005)
             try:
                 await c.send_packet(RespondPacket(c.game_pin, cor_index, id_pergunta))
             except Exception:
@@ -105,14 +117,15 @@ async def votar_ao_vivo(voto: VotoManualConfig):
     return {"status": "sucesso", "mensagem": f"Ataque em massa: Voto {voto.cor.upper()} enviado!"}
 
 @app.post("/desconectar")
-async def modo_panico():
+async def expulsar_bots():
     global clientes_ativos
     quantidade = len(clientes_ativos)
-    for cliente in list(clientes_ativos):
-        try:
-            await cliente.leave_game()
-        except Exception:
-            pass
+    
+    # Executa a saída de TODOS os bots paralelamente no mesmo milissegundo
+    if clientes_ativos:
+        tarefas = [asyncio.create_task(cliente.leave_game()) for cliente in clientes_ativos]
+        await asyncio.gather(*tarefas, return_exceptions=True)
+        
     clientes_ativos.clear()
-    return {"status": "sucesso", "mensagem": f"PÂNICO: {quantidade} bots desconectados."}
+    return {"status": "sucesso", "mensagem": f"EXPULSÃO: {quantidade} bots retirados imediatamente."}
     
