@@ -30,11 +30,12 @@ class BotConfig(BaseModel):
     cor: Optional[str] = None
     atraso: Optional[float] = 1.5
 
+# Nova configuração adaptada para aceitar Cor ou Texto Livre
 class VotoManualConfig(BaseModel):
-    cor: str
+    cor: Optional[str] = None
+    texto: Optional[str] = None
 
 def verificar_pin(pin: int) -> bool:
-    """Verifica diretamente na API do Kahoot se o PIN existe antes de tentar conectar."""
     try:
         req = urllib.request.Request(f"https://kahoot.it/reserve/session/{pin}/", headers={'User-Agent': 'Mozilla/5.0'})
         urllib.request.urlopen(req)
@@ -80,7 +81,6 @@ async def criar_bot_web(pin: int, nome: str, cor_estrategia: Optional[str], atra
 async def conectar(config: BotConfig):
     global clientes_ativos
     
-    # 1. Validação estrita do PIN antes de fazer qualquer coisa
     if not verificar_pin(config.pin):
         return {"status": "erro", "mensagem": "PIN INVÁLIDO. Verifique os números ou se a sala está aberta."}
         
@@ -98,34 +98,44 @@ async def votar_ao_vivo(voto: VotoManualConfig):
     if not clientes_ativos:
         return {"status": "erro", "mensagem": "Nenhum bot conectado para votar."}
         
-    cor_index = CORES.get(voto.cor.lower())
-    if cor_index is None:
-        return {"status": "erro", "mensagem": "Cor inválida."}
-
     votos_enviados = 0
     for i, cliente in enumerate(clientes_ativos):
         async def enviar_voto(c, idx, id_pergunta):
             await asyncio.sleep(idx * 0.005)
             try:
-                await c.send_packet(RespondPacket(c.game_pin, cor_index, id_pergunta))
+                # Se houver texto preenchido, manda texto. Se não, manda cor.
+                if voto.texto is not None:
+                    await c.send_packet(RespondPacket(c.game_pin, voto.texto, id_pergunta))
+                elif voto.cor is not None:
+                    cor_index = CORES.get(voto.cor.lower())
+                    if cor_index is not None:
+                        await c.send_packet(RespondPacket(c.game_pin, cor_index, id_pergunta))
             except Exception:
                 pass
         
         asyncio.create_task(enviar_voto(cliente, i, getattr(cliente, 'pergunta_atual', 0)))
         votos_enviados += 1
 
-    return {"status": "sucesso", "mensagem": f"Ataque em massa: Voto {voto.cor.upper()} enviado!"}
+    msg = f"Voto {voto.cor.upper()} enviado!" if voto.cor else f"Texto enviado!"
+    return {"status": "sucesso", "mensagem": f"Ataque em massa: {msg}"}
 
 @app.post("/desconectar")
 async def expulsar_bots():
     global clientes_ativos
     quantidade = len(clientes_ativos)
     
-    # Executa a saída de TODOS os bots paralelamente no mesmo milissegundo
-    if clientes_ativos:
-        tarefas = [asyncio.create_task(cliente.leave_game()) for cliente in clientes_ativos]
-        await asyncio.gather(*tarefas, return_exceptions=True)
+    if quantidade > 0:
+        bots_para_remover = list(clientes_ativos)
+        clientes_ativos.clear()
         
-    clientes_ativos.clear()
+        for cliente in bots_para_remover:
+            try:
+                if hasattr(cliente, 'leave'):
+                    asyncio.create_task(cliente.leave())
+                elif hasattr(cliente, 'leave_game'):
+                    asyncio.create_task(cliente.leave_game())
+            except Exception:
+                pass
+                
     return {"status": "sucesso", "mensagem": f"EXPULSÃO: {quantidade} bots retirados imediatamente."}
     
