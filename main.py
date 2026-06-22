@@ -4,7 +4,7 @@ import urllib.request
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 from kahoot import KahootClient
 from kahoot.packets.impl.respond import RespondPacket
@@ -23,11 +23,11 @@ app.add_middleware(
 CORES = {"vermelho": 0, "azul": 1, "amarelo": 2, "verde": 3}
 clientes_ativos = []
 
-# Payload adaptado para receber o tipo de painel ativo no frontend
 class VotoManualConfig(BaseModel):
     cor: Optional[str] = None
     texto: Optional[str] = None
-    tipo: Optional[str] = "alternativas" # "alternativas", "vf", "texto"
+    lista: Optional[List[int]] = None  # Recebe a ordenação do Puzzle ex: [3, 0, 1, 2]
+    tipo: Optional[str] = "alternativas"  # "alternativas", "vf", "texto", "puzzle"
 
 class BotConfig(BaseModel):
     pin: int
@@ -37,7 +37,6 @@ class BotConfig(BaseModel):
     atraso: Optional[float] = 1.5
 
 def verificar_pin(pin: int) -> bool:
-    """Valida o PIN diretamente nos servidores do Kahoot antes de prosseguir."""
     try:
         req = urllib.request.Request(f"https://kahoot.it/reserve/session/{pin}/", headers={'User-Agent': 'Mozilla/5.0'})
         urllib.request.urlopen(req)
@@ -71,7 +70,6 @@ async def criar_bot_web(pin: int, nome: str, cor_estrategia: Optional[str], atra
 
     try:
         await cliente.join_game(pin, nome)
-        # O bot permanece vivo enquanto estiver na lista global
         while cliente in clientes_ativos:
             await asyncio.sleep(0.5)
     except Exception:
@@ -83,9 +81,8 @@ async def criar_bot_web(pin: int, nome: str, cor_estrategia: Optional[str], atra
 @app.post("/conectar")
 async def conectar(config: BotConfig):
     global clientes_ativos
-    
     if not verificar_pin(config.pin):
-        return {"status": "erro", "mensagem": "PIN INVÁLIDO. Verifique os números ou se a sala está aberta."}
+        return {"status": "erro", "mensagem": "PIN INVÁLIDO. Verifique a sala."}
         
     clientes_ativos.clear()
 
@@ -93,78 +90,76 @@ async def conectar(config: BotConfig):
         nome = f"{config.nome_base}{i}"
         asyncio.create_task(criar_bot_web(config.pin, nome, config.cor, config.atraso, i))
 
-    return {"status": "sucesso", "mensagem": f"{config.quantidade} bots injetados na sessão!"}
+    return {"status": "sucesso", "mensagem": f"{config.quantidade} bots injetados com sucesso!"}
 
 @app.post("/votar")
 async def votar_ao_vivo(voto: VotoManualConfig):
     global clientes_ativos
     if not clientes_ativos:
-        return {"status": "erro", "mensagem": "Nenhum bot conectado para receber ordens."}
+        return {"status": "erro", "mensagem": "Nenhum bot ativo no momento."}
         
     valor_final_resposta = None
     msg_log_terminal = ""
 
-    # Tratamento baseado no tipo de pergunta selecionada pelo painel
+    # Sistema Inteligente de Mapeamento de Tipos de Questão
     if voto.tipo == "texto":
         valor_final_resposta = voto.texto
         msg_log_terminal = f"Responderam por extenso: '{voto.texto}'"
         
     elif voto.tipo == "vf":
-        # Correção estrita da inversão: Verdadeiro = Azul (Índice 1), Falso = Vermelho (Índice 0)
+        # CORREÇÃO DA INVERSÃO: No Kahoot True/False, o índice 0 é Verdadeiro e o 1 é Falso
         if voto.cor == "azul":
-            valor_final_resposta = 1
+            valor_final_resposta = 0
             msg_log_terminal = "Votaram VERDADEIRO"
         elif voto.cor == "vermelho":
-            valor_final_resposta = 0
+            valor_final_resposta = 1
             msg_log_terminal = "Votaram FALSO"
             
-    else: # alternativas / multipla escolha
+    elif voto.tipo == "puzzle":
+        valor_final_resposta = voto.lista
+        msg_log_terminal = f"Enviaram ordenação Puzzle: {voto.lista}"
+        
+    else:  # Alternativas / Múltipla Escolha Padrão
         valor_final_resposta = CORES.get(voto.cor.lower())
         if valor_final_resposta is None:
-            return {"status": "erro", "mensagem": "Cor de alternativa inválida."}
+            return {"status": "erro", "mensagem": "Alternativa inválida."}
         msg_log_terminal = f"Votaram na cor {voto.cor.upper()}"
 
-    # Dispara os pacotes em paralelo de forma imediata
+    # Disparo em massa assíncrono e ultra veloz
     for i, cliente in enumerate(clientes_ativos):
         async def disparar(c, idx, id_p, val):
             await asyncio.sleep(idx * 0.002)
             try:
                 await c.send_packet(RespondPacket(c.game_pin, val, id_p))
-            except Exception:
+            except:
                 pass
         asyncio.create_task(disparar(cliente, i, getattr(cliente, 'pergunta_atual', 0), valor_final_resposta))
 
-    return {"status": "sucesso", "mensagem": f"{msg_log_terminal}"}
+    return {"status": "sucesso", "mensagem": msg_log_terminal}
 
 @app.post("/desconectar")
 async def expulsar_bots():
     global clientes_ativos
     quantidade = len(clientes_ativos)
     
-    if quantidade > 0:
-        bots_alvo = list(clientes_ativos)
-        # Limpa imediatamente a lista síncrona. Isso quebra o laço 'while cliente in clientes_ativos' instantaneamente
-        clientes_ativos.clear()
+    if quantity_to_kill := len(clientes_ativos):
+        alvos = list(clientes_ativos)
+        clientes_ativos.clear()  # Corta loops imediatos de sustentação
         
-        # Função isolada para fechar conexões em segundo plano (evita timeouts HTTP no Render)
-        async def desativar_sockets(lista_bots):
-            for bot in lista_bots:
+        async def matar_sockets(lista):
+            for bot in lista:
                 try:
-                    # Força o encerramento do protocolo WebSocket subjacente
+                    # Força o desligamento direto da conexão TCP/WS subjacente
                     if hasattr(bot, 'ws') and bot.ws:
                         await bot.ws.close()
-                except:
-                    pass
+                    if hasattr(bot, 'socket') and bot.socket:
+                        await bot.socket.close()
+                except: pass
                 try:
-                    # Executa métodos de saída da biblioteca de forma não bloqueante
-                    if hasattr(bot, 'leave_game'):
-                        asyncio.create_task(bot.leave_game())
-                    elif hasattr(bot, 'leave'):
-                        asyncio.create_task(bot.leave())
-                except:
-                    pass
+                    if hasattr(bot, 'leave'): await bot.leave()
+                except: pass
 
-        asyncio.create_task(desativar_sockets(bots_alvo))
+        asyncio.create_task(matar_sockets(alvos))
         
-    return {"status": "sucesso", "mensagem": f"EXPULSÃO TERMINAL: {quantidade} bots eliminados com sucesso."}
-            
+    return {"status": "sucesso", "mensagem": f"EXPULSÃO DEFINITIVA: {quantidade} conexões terminadas."}
+        
