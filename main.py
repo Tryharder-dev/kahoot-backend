@@ -167,4 +167,4 @@ async def expulsar_bots():
         asyncio.create_task(desativar_sockets(bots_alvo))
         
     return {"status": "sucesso", "mensagem": f"EXPULSÃO TERMINAL: {quantidade} bots eliminados com sucesso."}
-        
+            
