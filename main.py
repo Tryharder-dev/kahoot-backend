@@ -23,6 +23,12 @@ app.add_middleware(
 CORES = {"vermelho": 0, "azul": 1, "amarelo": 2, "verde": 3}
 clientes_ativos = []
 
+# Payload adaptado para receber o tipo de painel ativo no frontend
+class VotoManualConfig(BaseModel):
+    cor: Optional[str] = None
+    texto: Optional[str] = None
+    tipo: Optional[str] = "alternativas" # "alternativas", "vf", "texto"
+
 class BotConfig(BaseModel):
     pin: int
     nome_base: str
@@ -30,12 +36,8 @@ class BotConfig(BaseModel):
     cor: Optional[str] = None
     atraso: Optional[float] = 1.5
 
-# Nova configuração adaptada para aceitar Cor ou Texto Livre
-class VotoManualConfig(BaseModel):
-    cor: Optional[str] = None
-    texto: Optional[str] = None
-
 def verificar_pin(pin: int) -> bool:
+    """Valida o PIN diretamente nos servidores do Kahoot antes de prosseguir."""
     try:
         req = urllib.request.Request(f"https://kahoot.it/reserve/session/{pin}/", headers={'User-Agent': 'Mozilla/5.0'})
         urllib.request.urlopen(req)
@@ -69,8 +71,9 @@ async def criar_bot_web(pin: int, nome: str, cor_estrategia: Optional[str], atra
 
     try:
         await cliente.join_game(pin, nome)
+        # O bot permanece vivo enquanto estiver na lista global
         while cliente in clientes_ativos:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
     except Exception:
         pass
     finally:
@@ -96,28 +99,42 @@ async def conectar(config: BotConfig):
 async def votar_ao_vivo(voto: VotoManualConfig):
     global clientes_ativos
     if not clientes_ativos:
-        return {"status": "erro", "mensagem": "Nenhum bot conectado para votar."}
+        return {"status": "erro", "mensagem": "Nenhum bot conectado para receber ordens."}
         
-    votos_enviados = 0
+    valor_final_resposta = None
+    msg_log_terminal = ""
+
+    # Tratamento baseado no tipo de pergunta selecionada pelo painel
+    if voto.tipo == "texto":
+        valor_final_resposta = voto.texto
+        msg_log_terminal = f"Responderam por extenso: '{voto.texto}'"
+        
+    elif voto.tipo == "vf":
+        # Correção estrita da inversão: Verdadeiro = Azul (Índice 1), Falso = Vermelho (Índice 0)
+        if voto.cor == "azul":
+            valor_final_resposta = 1
+            msg_log_terminal = "Votaram VERDADEIRO"
+        elif voto.cor == "vermelho":
+            valor_final_resposta = 0
+            msg_log_terminal = "Votaram FALSO"
+            
+    else: # alternativas / multipla escolha
+        valor_final_resposta = CORES.get(voto.cor.lower())
+        if valor_final_resposta is None:
+            return {"status": "erro", "mensagem": "Cor de alternativa inválida."}
+        msg_log_terminal = f"Votaram na cor {voto.cor.upper()}"
+
+    # Dispara os pacotes em paralelo de forma imediata
     for i, cliente in enumerate(clientes_ativos):
-        async def enviar_voto(c, idx, id_pergunta):
-            await asyncio.sleep(idx * 0.005)
+        async def disparar(c, idx, id_p, val):
+            await asyncio.sleep(idx * 0.002)
             try:
-                # Se houver texto preenchido, manda texto. Se não, manda cor.
-                if voto.texto is not None:
-                    await c.send_packet(RespondPacket(c.game_pin, voto.texto, id_pergunta))
-                elif voto.cor is not None:
-                    cor_index = CORES.get(voto.cor.lower())
-                    if cor_index is not None:
-                        await c.send_packet(RespondPacket(c.game_pin, cor_index, id_pergunta))
+                await c.send_packet(RespondPacket(c.game_pin, val, id_p))
             except Exception:
                 pass
-        
-        asyncio.create_task(enviar_voto(cliente, i, getattr(cliente, 'pergunta_atual', 0)))
-        votos_enviados += 1
+        asyncio.create_task(disparar(cliente, i, getattr(cliente, 'pergunta_atual', 0), valor_final_resposta))
 
-    msg = f"Voto {voto.cor.upper()} enviado!" if voto.cor else f"Texto enviado!"
-    return {"status": "sucesso", "mensagem": f"Ataque em massa: {msg}"}
+    return {"status": "sucesso", "mensagem": f"{msg_log_terminal}"}
 
 @app.post("/desconectar")
 async def expulsar_bots():
@@ -125,17 +142,29 @@ async def expulsar_bots():
     quantidade = len(clientes_ativos)
     
     if quantidade > 0:
-        bots_para_remover = list(clientes_ativos)
+        bots_alvo = list(clientes_ativos)
+        # Limpa imediatamente a lista síncrona. Isso quebra o laço 'while cliente in clientes_ativos' instantaneamente
         clientes_ativos.clear()
         
-        for cliente in bots_para_remover:
-            try:
-                if hasattr(cliente, 'leave'):
-                    asyncio.create_task(cliente.leave())
-                elif hasattr(cliente, 'leave_game'):
-                    asyncio.create_task(cliente.leave_game())
-            except Exception:
-                pass
-                
-    return {"status": "sucesso", "mensagem": f"EXPULSÃO: {quantidade} bots retirados imediatamente."}
-    
+        # Função isolada para fechar conexões em segundo plano (evita timeouts HTTP no Render)
+        async def desativar_sockets(lista_bots):
+            for bot in lista_bots:
+                try:
+                    # Força o encerramento do protocolo WebSocket subjacente
+                    if hasattr(bot, 'ws') and bot.ws:
+                        await bot.ws.close()
+                except:
+                    pass
+                try:
+                    # Executa métodos de saída da biblioteca de forma não bloqueante
+                    if hasattr(bot, 'leave_game'):
+                        asyncio.create_task(bot.leave_game())
+                    elif hasattr(bot, 'leave'):
+                        asyncio.create_task(bot.leave())
+                except:
+                    pass
+
+        asyncio.create_task(desativar_sockets(bots_alvo))
+        
+    return {"status": "sucesso", "mensagem": f"EXPULSÃO TERMINAL: {quantidade} bots eliminados com sucesso."}
+        
